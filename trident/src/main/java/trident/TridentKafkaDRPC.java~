@@ -1,0 +1,161 @@
+package trident;
+
+import java.io.IOException;
+
+import storm.kafka.StringScheme;
+import storm.kafka.ZkHosts;
+import storm.kafka.trident.TransactionalTridentKafkaSpout;
+import storm.kafka.trident.TridentKafkaConfig;
+import storm.trident.TridentState;
+import storm.trident.TridentTopology;
+import storm.trident.operation.builtin.Count;
+import storm.trident.operation.builtin.Debug;
+import storm.trident.operation.builtin.FilterNull;
+import storm.trident.operation.builtin.FirstN;
+import storm.trident.operation.builtin.MapGet;
+import storm.trident.operation.builtin.Sum;
+import storm.trident.operation.builtin.TupleCollectionGet;
+import storm.trident.testing.FixedBatchSpout;
+import storm.trident.testing.MemoryMapState;
+import backtype.storm.Config;
+import backtype.storm.LocalCluster;
+import backtype.storm.LocalDRPC;
+import backtype.storm.generated.StormTopology;
+import backtype.storm.spout.SchemeAsMultiScheme;
+import backtype.storm.tuple.Fields;
+import backtype.storm.tuple.Values;
+
+import java.util.UUID;
+
+public class TridentKafkaDRPC {
+
+	public static StormTopology buildTopology (LocalDRPC drpc) throws IOException {
+		
+//		// TEST SPOUT
+//		@SuppressWarnings("unchecked")
+//		FixedBatchSpout spoutTest = new FixedBatchSpout(new Fields("str"), 3,
+//				new Values("560537,23103,JINGLE BELL HEART DECORATION,24,7/19/2011 12:19,1.65,17779,United Kingdom"),
+//				new Values("560537,84596F,SMALL MARSHMALLOWS PINK BOWL,8,7/19/2011 12:19,1.42,12779,United Kingdom"),
+//				new Values("560537,84596F,SMALL MARSHMALLOWS PINK BOWL,8,7/19/2011 12:19,2.42,13779,United Kingdom"),
+//				new Values("560537,84596F,SMALL MARSHMALLOWS PINK BOWL,8,7/19/2011 12:19,3.42,14779,United Kingdom"),
+//				new Values("560537,84596F,SMALL MARSHMALLOWS PINK BOWL,8,7/19/2011 12:19,4.42,15779,United Kingdom"),
+//				new Values("560537,84596F,SMALL MARSHMALLOWS PINK BOWL,8,7/19/2011 12:19,5.42,16779,United Kingdom"),
+//				new Values("560537,84596F,SMALL MARSHMALLOWS PINK BOWL,8,7/19/2011 12:19,6.42,18779,United Kingdom"),
+//				new Values("C560540,85099B,JUMBO BAG RED RETROSPOT,-1,7/19/2011 12:26,2.08,12415,Australia"),
+//				new Values("C560540,23307,SET OF 60 PANTRY DESIGN CAKE CASES ,-1,7/19/2011 12:26,0.55,12415,Australia"),
+//				new Values("C560540,23295,SET OF 12 MINI LOAF BAKING CASES,-2,7/19/2011 12:26,0.83,12415,Australia"),
+//				new Values("560544,20754,RETROSPOT RED WASHING UP GLOVES,6,7/19/2011 12:37,2.1,12569,Germany"),
+//				new Values("560545,22055,MINI CAKE STAND  HANGING STRAWBERY,8,7/19/2011 12:38,1.65,12569,Germany"),
+//				new Values("560545,22551,PLASTERS IN TIN SPACEBOY,12,7/19/2011 12:38,1.65,12569,Germany"),
+//				new Values("560549,22467,GUMBALL COAT RACK,6,7/19/2011 12:43,2.55,12664,Finland"),
+//				new Values("560549,84997D,CHILDRENS CUTLERY POLKADOT PINK,72,7/19/2011 12:43,3.75,12664,Finland"),
+//				new Values("C560589,85132C,CHARLIE AND LOLA FIGURES TINS,-2,7/19/2011 15:50,1.95,15249,United Kingdom"));
+//		
+		
+		
+		// Creamos el spout para leer de kafka
+		ZkHosts hosts = new ZkHosts("namenode:2181");
+		TridentKafkaConfig spoutConfig = new TridentKafkaConfig(hosts, "compras-trident");
+		spoutConfig.scheme = new SchemeAsMultiScheme(new StringScheme());
+		spoutConfig.forceFromStart = true;
+		
+		// Generamos el spout con la configiracion anterior
+		TransactionalTridentKafkaSpout kafkaSpout = new TransactionalTridentKafkaSpout(spoutConfig);		
+		
+		
+		// Instanciamos la topologia
+		TridentTopology topology = new TridentTopology();
+		
+		
+		// 1) Creamos el pipeline para las tuplas del streaming de datos
+		// de las compras
+		// TEST TOPOLOGY
+
+		// topologia para procesar las compras
+		// OJO
+		// cuando trabajamos con varias topologias debemos de poner nombres diferentes en los
+		// spouts, en este caso: spout1 y spout2. 
+		// Si no se hace esto pueden surgir errores de runtime!!
+		TridentState totalSell = topology
+				.newStream("spout1", kafkaSpout)
+				.each(new Fields("str"), new TridentUtility.SplitInvoice(), new Fields("invoiceNo", "stockCode", "description", "quantity", "invoiceDate", "unitPrice", "customerID", "country"))
+				.each(new Fields("quantity", "unitPrice"), new TridentUtility.TotalAmount(), new Fields("totalAmount"))
+				.project(new Fields("customerID", "country", "totalAmount"))
+				.each(new Fields("customerID"), new FilterNull())
+				.each(new Fields("totalAmount"), new TridentUtility.FilterSell())
+				//.each(new Fields("country", "customerID", "totalAmount"), new Debug())
+				.groupBy(new Fields("country", "customerID"))
+				.persistentAggregate(new MemoryMapState.Factory(), new Fields("totalAmount"), new Sum(), new Fields("sumAmountSell"));
+		
+		// topologia para procesar las cancelaciones
+		TridentState totalCancel = topology
+				.newStream("spout2", kafkaSpout)
+				.each(new Fields("str"), new TridentUtility.SplitInvoice(), new Fields("invoiceNo", "stockCode", "description", "quantity", "invoiceDate", "unitPrice", "customerID", "country"))
+				.each(new Fields("quantity", "unitPrice"), new TridentUtility.TotalAmount(), new Fields("totalAmount"))
+				.project(new Fields("customerID", "country", "totalAmount"))
+				.each(new Fields("customerID"), new FilterNull())
+				.each(new Fields("totalAmount"), new TridentUtility.FilterCancel())
+				//.each(new Fields("country", "customerID", "totalAmount"), new Debug())
+				.groupBy(new Fields("country", "customerID"))
+				.persistentAggregate(new MemoryMapState.Factory(), new Fields("totalAmount"), new Sum(), new Fields("sumAmountCancel"));
+		
+		
+		// 2) Creamos el acceso RPC para las queries del usuario
+
+
+		// RPC para hacer el query sobre compras
+		topology
+			.newDRPCStream("status_sell", drpc)
+			.each(new Fields("args"), new TridentUtility.Split(), new Fields("country_query"))
+			//.each(new Fields("country_query"), new Debug())
+			.stateQuery(totalSell, new TupleCollectionGet(), new Fields("country", "customerID"))
+			.stateQuery(totalSell, new Fields("country", "customerID"), new MapGet(), new Fields("sumAmountSell"))
+			.each(new Fields("country", "country_query"), new TridentUtility.SelectedCountries())
+			.groupBy(new Fields("country"))
+			.aggregate(new Fields("customerID","sumAmountSell"), new FirstN.FirstNSortedAgg(5, "sumAmountSell", true), new Fields("customerID","sumAmountSell"));
+			
+			
+		// RPC para hacer el query sobre cancelaciones
+		topology
+			.newDRPCStream("status_cancel", drpc)
+			.each(new Fields("args"), new TridentUtility.Split(), new Fields("country_query"))
+			//.each(new Fields("country_query"), new Debug())
+			.stateQuery(totalCancel, new TupleCollectionGet(), new Fields("country", "customerID"))
+			//.each(new Fields("country", "country_query"), new TridentUtility.SelectedCountries())
+			//.each(new Fields("country", "customerID"), new Debug());
+			.stateQuery(totalCancel, new Fields("country", "customerID"), new MapGet(), new Fields("sumAmountCancel"))
+			.each(new Fields("country", "country_query"), new TridentUtility.SelectedCountries())
+			.groupBy(new Fields("country"))
+			.aggregate(new Fields("customerID","sumAmountCancel"), new FirstN.FirstNSortedAgg(5, "sumAmountCancel", false), new Fields("customerID","sumAmountCancel"));
+		
+		
+		
+		return topology.build();
+		
+	}
+	
+	
+	
+	public static void main (String[] args) throws Exception {
+		// TODO
+		Config conf = new Config();
+		conf.setMaxSpoutPending(20);
+		LocalCluster cluster = new LocalCluster();
+		
+		LocalDRPC drpc = new LocalDRPC();
+		cluster.submitTopology("trident-kafka-topology", conf, buildTopology(drpc));
+		String country_list = new String("United Kingdom");
+		
+		for (int i = 0; i < 100; i++) {
+			System.out.println("Top 5 clientes compras: " + drpc.execute("status_sell", country_list));
+			System.out.println("Top 5 clientes cancelaciones: " + drpc.execute("status_cancel", country_list));
+			Thread.sleep(1000);
+		}
+		
+		drpc.shutdown();
+		cluster.shutdown();
+	}
+	
+	
+	
+}
